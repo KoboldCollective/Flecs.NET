@@ -16,7 +16,6 @@ namespace Flecs.NET.Core;
 ///     Static class that registers and stores information about types.
 /// </summary>
 /// <typeparam name="T"></typeparam>
-[SuppressMessage("ReSharper", "StaticMemberInGenericType")]
 public static unsafe class Type<T>
 {
     /// <summary>
@@ -328,58 +327,60 @@ public static unsafe class Type<T>
             hooksContext.Move.Invoker = (delegate*<GCHandle*, GCHandle*, int, ecs_type_info_t*, void>)&Functions.DefaultManagedMoveCallback<T>;
         }
 
-        if (typeof(ICtorHook<T>).IsAssignableFrom(typeof(T)))
+        IHookProvider? hookProvider = GetHookProvider();
+
+        if (hookProvider != null && hookProvider.CtorPointer != null)
         {
             hooksContext.Ctor.Invoker = isManaged
                 ? (delegate*<GCHandle*, int, ecs_type_info_t*, void>)&Functions.ManagedCtorCallbackPointer<T>
                 : (delegate*<T*, int, ecs_type_info_t*, void>)&Functions.UnmanagedCtorCallbackPointer<T>;
 
-            hooksContext.Ctor.Pointer = HookPointer(typeof(ICtorHook<>.FunctionPointer<>));
+            hooksContext.Ctor.Pointer = hookProvider.CtorPointer;
         }
 
-        if (typeof(IDtorHook<T>).IsAssignableFrom(typeof(T)))
+        if (hookProvider != null && hookProvider.DtorPointer != null)
         {
             hooksContext.Dtor.Invoker = isManaged
                 ? (delegate*<GCHandle*, int, ecs_type_info_t*, void>)&Functions.ManagedDtorCallbackPointer<T>
                 : (delegate*<T*, int, ecs_type_info_t*, void>)&Functions.UnmanagedDtorCallbackPointer<T>;
 
-            hooksContext.Dtor.Pointer = HookPointer(typeof(IDtorHook<>.FunctionPointer<>));
+            hooksContext.Dtor.Pointer = hookProvider.DtorPointer;
         }
 
-        if (typeof(ICopyHook<T>).IsAssignableFrom(typeof(T)))
+        if (hookProvider != null && hookProvider.CopyPointer != null)
         {
             hooksContext.Copy.Invoker = isManaged
                 ? (delegate*<GCHandle*, GCHandle*, int, ecs_type_info_t*, void>)&Functions.ManagedCopyCallbackPointer<T>
                 : (delegate*<T*, T*, int, ecs_type_info_t*, void>)&Functions.UnmanagedCopyCallbackPointer<T>;
 
-            hooksContext.Copy.Pointer = HookPointer(typeof(ICopyHook<>.FunctionPointer<>));
+            hooksContext.Copy.Pointer = hookProvider.CopyPointer;
         }
 
-        if (typeof(IMoveHook<T>).IsAssignableFrom(typeof(T)))
+        if (hookProvider != null && hookProvider.MovePointer != null)
         {
             hooksContext.Move.Invoker = isManaged
                 ? (delegate*<GCHandle*, GCHandle*, int, ecs_type_info_t*, void>)&Functions.ManagedMoveCallbackPointer<T>
                 : (delegate*<T*, T*, int, ecs_type_info_t*, void>)&Functions.UnmanagedMoveCallbackPointer<T>;
 
-            hooksContext.Move.Pointer = HookPointer(typeof(IMoveHook<>.FunctionPointer<>));
+            hooksContext.Move.Pointer = hookProvider.MovePointer;
         }
 
-        if (typeof(IOnAddHook<T>).IsAssignableFrom(typeof(T)))
+        if (hookProvider != null && hookProvider.OnAddPointer != null)
         {
             hooksContext.OnAdd.Invoker = (delegate*<ecs_iter_t*, void>)&Functions.OnAddEachIterRefCallbackPointer<T>;
-            hooksContext.OnAdd.Pointer = HookPointer(typeof(IOnAddHook<>.FunctionPointer<>));
+            hooksContext.OnAdd.Pointer = hookProvider.OnAddPointer;
         }
 
-        if (typeof(IOnRemoveHook<T>).IsAssignableFrom(typeof(T)))
+        if (hookProvider != null && hookProvider.OnRemovePointer != null)
         {
             hooksContext.OnRemove.Invoker = (delegate*<ecs_iter_t*, void>)&Functions.OnRemoveEachIterRefCallbackPointer<T>;
-            hooksContext.OnRemove.Pointer = HookPointer(typeof(IOnRemoveHook<>.FunctionPointer<>));
+            hooksContext.OnRemove.Pointer = hookProvider.OnRemovePointer;
         }
 
-        if (typeof(IOnSetHook<T>).IsAssignableFrom(typeof(T)))
+        if (hookProvider != null && hookProvider.OnSetPointer != null)
         {
             hooksContext.OnSet.Invoker = (delegate*<ecs_iter_t*, void>)&Functions.OnSetEachIterRefCallbackPointer<T>;
-            hooksContext.OnSet.Pointer = HookPointer(typeof(IOnSetHook<>.FunctionPointer<>));
+            hooksContext.OnSet.Pointer = hookProvider.OnSetPointer;
         }
 
         ecs_type_hooks_t hooks = default;
@@ -404,12 +405,15 @@ public static unsafe class Type<T>
         return component;
     }
 
-    private static void* HookPointer(System.Type openGeneric)
+    [UnconditionalSuppressMessage("Trimming", "IL2087")]
+    private static IHookProvider? GetHookProvider()
     {
-        return (void*)(nint)openGeneric
-            .MakeGenericType(typeof(T), typeof(T))
-            .GetMethod("Get")!
-            .Invoke(null, null)!;
+        if (!typeof(IHookProvider).IsAssignableFrom(typeof(T)) || typeof(T).IsAbstract)
+            return null;
+
+        return typeof(T).IsValueType
+            ? (IHookProvider)(object)default(T)!
+            : (IHookProvider)RuntimeHelpers.GetUninitializedObject(typeof(T));
     }
 
     /// <summary>
@@ -706,7 +710,7 @@ public static unsafe class Type<T>
         return alignment;
     }
 
-    [SuppressMessage("Usage", "CA1508")]
+    [UnconditionalSuppressMessage("Trimming", "IL2090")]
     private static void NativeLayout(out int size, out int alignment)
     {
         Type type = typeof(T);
@@ -758,11 +762,8 @@ public static unsafe class Type<T>
         }
     }
 
-    [SuppressMessage("ReSharper", "PrivateFieldCanBeConvertedToLocalVariable")]
-    [SuppressMessage("ReSharper", "NotAccessedPositionalProperty.Local")]
     private readonly record struct AlignOfHelper(byte Dummy, T Data);
 
-    [SuppressMessage("ReSharper", "MemberHidesStaticFromOuterClass")]
     private readonly record struct EnumMember(long Value, int CacheIndex);
 
     /// <summary>

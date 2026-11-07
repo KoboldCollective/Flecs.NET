@@ -4,7 +4,7 @@ namespace Flecs.NET.Core.Hooks;
 ///     Interface for registering a ctor hook callback with the provided type.
 /// </summary>
 /// <typeparam name="T">The component type.</typeparam>
-public interface ICtorHook<T>
+public interface ICtorHook<T> : IHookProvider where T : ICtorHook<T>
 {
     /// <summary>
     ///     The ctor hook callback.
@@ -13,11 +13,5 @@ public interface ICtorHook<T>
     /// <param name="typeInfo">The component's type info.</param>
     public static abstract void Ctor(ref T data, TypeInfo typeInfo);
 
-    internal static unsafe class FunctionPointer<TInterface> where TInterface : ICtorHook<T>
-    {
-        public static delegate*<ref T, TypeInfo, void> Get()
-        {
-            return &TInterface.Ctor;
-        }
-    }
+    unsafe void* IHookProvider.CtorPointer => (delegate*<ref T, TypeInfo, void>)&T.Ctor;
 }
