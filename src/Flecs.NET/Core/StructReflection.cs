@@ -34,12 +34,15 @@ public static unsafe class StructReflection<T>
     [EditorBrowsable(EditorBrowsableState.Never)]
     public static void RegisterArray<TElement>(int count)
     {
-        // Same as ecs_array_init, but on the existing component entity instead of a new one.
-        _registrar = component => component.Set(new EcsArray
+        _registrar = component =>
         {
-            type = Type<TElement>.Id(component.WorldPtr),
-            count = count
-        });
+            component.Set(new EcsArray
+            {
+                type = Type<TElement>.Id(component.WorldPtr),
+                count = count
+            });
+            component.EnableRttHooks();
+        };
     }
 
     /// <summary>

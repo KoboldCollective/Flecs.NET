@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.CompilerServices;
 using Flecs.NET.Core;
+using Flecs.NET.Core.Hooks;
 using Xunit;
 using static Flecs.NET.Bindings.flecs;
 
@@ -582,6 +583,244 @@ namespace Flecs.NET.Tests.CSharp.Core
             Assert.Equal(16, type.Get<EcsComponent>().size);
         }
 
+        [Fact]
+        private void ReflectedStructMemberHooksFire()
+        {
+            using World world = World.Create();
+            world.Component<HookedMember>();
+            world.Component<ReflectedOuter>();
+            AssertForwardsMemberHooks(world, new ReflectedOuter { Member = new HookedMember { Value = 1 } });
+
+            // Ordering check: register the outer type before the member type.
+            using World outerFirstWorld = World.Create();
+            outerFirstWorld.Component<ReflectedOuter>();
+            AssertForwardsMemberHooks(outerFirstWorld, new ReflectedOuter { Member = new HookedMember { Value = 2 } });
+        }
+
+        [Fact]
+        private void ManualStructMemberHooksFire()
+        {
+            using World world = World.Create();
+            world.Component<HookedMember>();
+            world.Component<ManualOuter>().Member<HookedMember>("Member");
+
+            AssertForwardsMemberHooks(world, new ManualOuter { Member = new HookedMember { Value = 1 } });
+        }
+
+        [Fact]
+        private void ManualNestedStructMemberHooksFire()
+        {
+            using World world = World.Create();
+            world.Component<HookedMember>();
+            world.Component<ManualOuter>().Member<HookedMember>("Member");
+            world.Component<ManualNestedOuter>().Member<ManualOuter>("Outer");
+
+            AssertForwardsMemberHooks(world, new ManualNestedOuter
+            {
+                Outer = new ManualOuter { Member = new HookedMember { Value = 1 } }
+            });
+        }
+
+        [Fact]
+        private void ReflectedNestedStructMemberHooksFire()
+        {
+            using World world = World.Create();
+            world.Component<HookedMember>();
+            AssertForwardsMemberHooks(world, new ReflectedNestedOuter
+            {
+                Outer = new ReflectedOuter { Member = new HookedMember { Value = 1 } }
+            });
+
+            // Ordering check: register the inner reflected type before the outer one.
+            using World innerFirstWorld = World.Create();
+            innerFirstWorld.Component<ReflectedOuter>();
+            innerFirstWorld.Component<ReflectedNestedOuter>();
+            AssertForwardsMemberHooks(innerFirstWorld, new ReflectedNestedOuter
+            {
+                Outer = new ReflectedOuter { Member = new HookedMember { Value = 2 } }
+            });
+        }
+
+        [Fact]
+        private void PlainStructMemberHooksDoNotFire()
+        {
+            // Only [FlecsStruct] types get meta reflection, so flecs has no member types to
+            // forward hooks to for a plain struct. Documented current behavior: no member hooks.
+            using World world = World.Create();
+            world.Component<HookedMember>();
+            world.Component<PlainOuter>();
+            Reset();
+
+            world.Entity().Set(new PlainOuter { Member = new HookedMember { Value = 1 } });
+            Assert.Equal(0, HookedMember.CopyCount);
+
+            Entity prefab = world.Prefab().Set(new PlainOuter { Member = new HookedMember { Value = 2 } });
+            Reset();
+            Entity instance = world.Entity().IsA(prefab);
+            instance.Destruct();
+
+            Assert.Equal(0, HookedMember.CopyCount);
+            Assert.Equal(0, HookedMember.DtorCount);
+        }
+
+        [Fact]
+        private void CallbackHookBeforeMemberKeepsUserHook()
+        {
+            using World world = World.Create();
+            world.Component<HookedMember>();
+            int userDtorCount = 0;
+
+            world.Component<CallbackOuter>()
+                .Dtor((ref CallbackOuter _, TypeInfo _) => userDtorCount++)
+                .Member<HookedMember>("Member");
+
+            Reset();
+            world.Entity().Set(new CallbackOuter { Member = new HookedMember { Value = 1 } }).Destruct();
+
+            Assert.True(userDtorCount > 0, "rtt replaced the user dtor hook");
+            Assert.Equal(0, HookedMember.DtorCount);
+        }
+
+        [Fact]
+        private void ObserverOnlyHookProviderStillForwards()
+        {
+            using World world = World.Create();
+            world.Component<HookedMember>();
+            ObserverOnlyOuter.OnAddCount = 0;
+            world.Component<ObserverOnlyOuter>().Member<HookedMember>("Member");
+
+            AssertForwardsMemberHooks(world, new ObserverOnlyOuter { Member = new HookedMember { Value = 1 } });
+            Assert.True(ObserverOnlyOuter.OnAddCount > 0, "observer-only hook was not preserved");
+        }
+
+        [Fact]
+        private void UntypedMemberForwardsHooks()
+        {
+            using World world = World.Create();
+            world.Component<HookedMember>();
+
+            // Existing component registered from a C# type.
+            ulong id = world.Component<ManualOuter>();
+            world.Component(id).Member<HookedMember>("Member");
+            Reset();
+            world.Entity().Set(new ManualOuter { Member = new HookedMember { Value = 1 } });
+            Assert.True(HookedMember.CopyCount > 0, "untyped Member path did not forward member hooks");
+
+            // Fresh untyped component, flecs generates the hooks itself.
+            UntypedComponent fresh = world.Component("UntypedFresh").Member<HookedMember>("Member");
+            ecs_type_hooks_t* freshHooks = ecs_get_hooks_id(world, fresh.Id);
+            Assert.True(freshHooks != null && freshHooks->copy != null, "fresh untyped Member path has no member hooks");
+        }
+
+        [Fact]
+        private void MemberAfterInUseDoesNotThrow()
+        {
+            using World world = World.Create();
+            world.Component<HookedMember>();
+            ulong id = world.Component<ManualOuter>();
+
+            // Use the component first, e.g. to add reflection data afterwards.
+            world.Entity().Set(new ManualOuter { Member = new HookedMember { Value = 1 } });
+            world.Component(id).Member<HookedMember>("Member");
+
+            ecs_type_hooks_t* hooks = ecs_get_hooks_id(world, id);
+            Assert.True(hooks != null && hooks->copy == null, "in-use component had its hooks reconfigured");
+        }
+
+        [Fact]
+        private void MultipleHookedMembersForward()
+        {
+            using World world = World.Create();
+            world.Component<HookedMember>();
+            world.Component<TwoHookedOuter>().Member<HookedMember>("First").Member<HookedMember>("Second");
+
+            Reset();
+            world.Entity().Set(new TwoHookedOuter
+            {
+                First = new HookedMember { Value = 1 },
+                Second = new HookedMember { Value = 2 }
+            });
+
+            Assert.True(HookedMember.CopyCount >= 2, $"only {HookedMember.CopyCount} of 2 hooked members were forwarded");
+        }
+
+        [Fact]
+        private void InlineArrayOfHookedMembersForwardsHooks()
+        {
+            using World world = World.Create();
+            world.Component<HookedMember>();
+            world.Component<HookedArray>();
+
+            AssertForwardsMemberHooks(world, new HookedArray());
+        }
+
+        [Fact]
+        private void CustomCompareBeforeMemberIsPreserved()
+        {
+            using World world = World.Create();
+            world.Component<HookedMember>();
+            int userCompareCount = 0;
+            int userEqualsCount = 0;
+
+            ulong id = world.Component<CompareOuter>()
+                .OnEquals((ref CompareOuter a, ref CompareOuter b, TypeInfo _) =>
+                {
+                    userEqualsCount++;
+                    return a.Member.Value == b.Member.Value;
+                })
+                .OnCompare((ref CompareOuter a, ref CompareOuter b, TypeInfo _) =>
+                {
+                    userCompareCount++;
+                    return a.Member.Value - b.Member.Value;
+                })
+                .Member<HookedMember>("Member");
+
+            CompareOuter a = new() { Member = new HookedMember { Value = 1 } };
+            CompareOuter b = new() { Member = new HookedMember { Value = 2 } };
+
+            ecs_type_info_t* ti = ecs_get_type_info(world, id);
+            Assert.True((ti->hooks.flags & ECS_TYPE_HOOK_CMP_ILLEGAL) == 0,
+                $"custom compare hook was dropped (flags={ti->hooks.flags})");
+            Assert.True((ti->hooks.flags & ECS_TYPE_HOOK_EQUALS_ILLEGAL) == 0,
+                $"custom equals hook was dropped (flags={ti->hooks.flags})");
+            Assert.True(ti->hooks.cmp(&a, &b, ti) < 0, "custom compare hook was replaced by rtt");
+            Assert.False(ti->hooks.equals(&a, &b, ti), "custom equals hook was replaced by rtt");
+            Assert.True(userCompareCount > 0, "custom compare hook was not called");
+            Assert.True(userEqualsCount > 0, "custom equals hook was not called");
+        }
+
+        private static void Reset()
+        {
+            HookedMember.CtorCount = 0;
+            HookedMember.DtorCount = 0;
+            HookedMember.CopyCount = 0;
+            HookedMember.MoveCount = 0;
+        }
+
+        // Set, prefab instantiate and destruct an outer component and check that the hooked member's
+        // copy and dtor hooks ran, i.e. that the outer's hooks forward to its member types.
+        private static void AssertForwardsMemberHooks<TOuter>(World world, TOuter value)
+        {
+            Reset();
+            world.Entity().Set(value);
+            int copyOnSet = HookedMember.CopyCount;
+
+            Entity prefab = world.Prefab().Set(value);
+            Reset();
+            Entity instance = world.Entity().IsA(prefab);
+            int copyOnInstantiate = HookedMember.CopyCount;
+
+            Reset();
+            instance.Destruct();
+            int dtorOnDestruct = HookedMember.DtorCount;
+
+            string counts =
+                $"copyOnSet={copyOnSet}, copyOnInstantiate={copyOnInstantiate}, dtorOnDestruct={dtorOnDestruct}";
+            Assert.True(copyOnSet > 0, $"member copy hook did not fire on set ({counts})");
+            Assert.True(copyOnInstantiate > 0, $"member copy hook did not fire on prefab instantiation ({counts})");
+            Assert.True(dtorOnDestruct > 0, $"member dtor hook did not fire on entity destruction ({counts})");
+        }
+
         private static FixedPlayer CreatePlayer(string name, int score, params int[] items)
         {
             FixedPlayer player = default;
@@ -750,3 +989,103 @@ internal unsafe struct PointerValues
     private int* _element0;
 }
 #pragma warning restore CS9184
+
+internal struct HookedMember :
+    ICtorHook<HookedMember>,
+    IDtorHook<HookedMember>,
+    ICopyHook<HookedMember>,
+    IMoveHook<HookedMember>
+{
+    public static int CtorCount;
+    public static int DtorCount;
+    public static int CopyCount;
+    public static int MoveCount;
+
+    public int Value;
+
+    public static void Ctor(ref HookedMember data, TypeInfo _)
+    {
+        CtorCount++;
+        data = default;
+    }
+
+    public static void Dtor(ref HookedMember data, TypeInfo _)
+    {
+        DtorCount++;
+        data = default;
+    }
+
+    public static void Copy(ref HookedMember dst, ref HookedMember src, TypeInfo _)
+    {
+        CopyCount++;
+        dst = src;
+    }
+
+    public static void Move(ref HookedMember dst, ref HookedMember src, TypeInfo _)
+    {
+        MoveCount++;
+        dst = src;
+        src = default;
+    }
+}
+
+[FlecsStruct]
+internal struct ReflectedOuter
+{
+    public HookedMember Member;
+}
+
+[FlecsStruct]
+internal struct ReflectedNestedOuter
+{
+    public ReflectedOuter Outer;
+}
+
+internal struct PlainOuter
+{
+    public HookedMember Member;
+}
+
+internal struct ManualOuter
+{
+    public HookedMember Member;
+}
+
+internal struct ManualNestedOuter
+{
+    public ManualOuter Outer;
+}
+
+internal struct CompareOuter
+{
+    public HookedMember Member;
+}
+
+internal struct CallbackOuter
+{
+    public HookedMember Member;
+}
+
+internal struct ObserverOnlyOuter : IOnAddHook<ObserverOnlyOuter>
+{
+    public static int OnAddCount;
+    public HookedMember Member;
+
+    public static void OnAdd(Iter it, int i, ref ObserverOnlyOuter data)
+    {
+        OnAddCount++;
+    }
+}
+
+internal struct TwoHookedOuter
+{
+    public HookedMember First;
+    public HookedMember Second;
+}
+
+[InlineArray(4)]
+[FlecsStruct]
+internal struct HookedArray
+{
+    private HookedMember _element0;
+}

@@ -95,6 +95,7 @@ public unsafe partial struct UntypedComponent : IEquatable<UntypedComponent>, IE
         member.offset = offset;
         entity.Set(member);
 
+        EnableRttHooks();
         return ref this;
     }
 
@@ -150,6 +151,71 @@ public unsafe partial struct UntypedComponent : IEquatable<UntypedComponent>, IE
     public ref UntypedComponent Member<T, TUnit>(string name, int count = 0, int offset = 0)
     {
         return ref Member(Type<T>.Id(WorldPtr), Type<TUnit>.Id(WorldPtr), name, count, offset);
+    }
+
+    /// <summary>
+    ///     Lets flecs generate ctor/dtor/copy/move hooks for this struct or array from its reflected
+    ///     members, so members with their own hooks are constructed, copied and freed with it.
+    ///     Flecs skips types that already had a size when reflection was added ("existing" types).
+    ///     This clears that flag, lets flecs regenerate the hooks, then sets it back, because
+    ///     otherwise later members would make flecs replace the C# size with its own.
+    ///     Skipped when the type has its own lifecycle hooks or is already in use.
+    /// </summary>
+    internal void EnableRttHooks()
+    {
+        EcsType* type = (EcsType*)ecs_get_id(WorldPtr, Id, FLECS_IDEcsTypeID_);
+        if (type == null || !type->existing ||
+            (type->kind != EcsStructType && type->kind != EcsArrayType))
+        {
+            return;
+        }
+
+        ecs_world_t* world = ecs_get_world(WorldPtr);
+        ecs_type_info_t* typeInfo = ecs_get_type_info(world, Id);
+        if (typeInfo == null)
+            return;
+
+        ecs_type_hooks_t previous = typeInfo->hooks;
+
+        // Skip types with their own lifecycle hooks. Hooks set through Flecs.NET record the real
+        // callbacks in a TypeHooksContext; the raw pointers don't help, because flecs sets a default
+        // ctor and earlier calls of this method set the rest. Hooks set natively have no context.
+        TypeHooksContext* context = (TypeHooksContext*)previous.binding_ctx;
+        if (context != null && context->Header != Ecs.Header)
+            context = null;
+
+        bool customLifecycle = context == null
+            ? previous.ctor != null || previous.dtor != null || previous.copy != null || previous.move != null
+            : context->Ctor.Invoker != null || context->Dtor.Invoker != null ||
+              context->Copy.Invoker != null || context->Move.Invoker != null;
+
+        if (customLifecycle)
+            return;
+
+        // Flecs can't change the hooks of a component that is already in use.
+        if (ecs_id_in_use(world, Id) || ecs_id_in_use(world, Ecs.Pair(Id, EcsWildcard)))
+            return;
+
+        // Flecs regenerates compare/equals as well, so custom ones must be put back afterwards.
+        bool restoreCompareEquals = context != null &&
+            (context->OnCompare.Invoker != null || context->OnEquals.Invoker != null);
+
+        type->existing = false;
+        ecs_modified_id(WorldPtr, Id, FLECS_IDEcsTypeID_);
+
+        // Regenerating can add components to the type entity and move its data, so fetch it again.
+        type = (EcsType*)ecs_ensure_id(WorldPtr, Id, FLECS_IDEcsTypeID_, sizeof(EcsType));
+        type->existing = true;
+
+        if (!restoreCompareEquals)
+            return;
+
+        // Set only compare/equals; null fields leave the other hooks untouched.
+        ecs_type_hooks_t hooks = default;
+        hooks.cmp = previous.cmp;
+        hooks.equals = previous.equals;
+        hooks.flags = previous.flags & ~(ECS_TYPE_HOOK_CMP_ILLEGAL | ECS_TYPE_HOOK_EQUALS_ILLEGAL);
+        ecs_set_hooks_id(WorldPtr, Id, &hooks);
     }
 
     /// <summary>
