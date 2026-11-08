@@ -42,6 +42,7 @@ internal unsafe struct NativeList<T> : IEnumerable<T>, IDisposable where T : unm
             Data = null;
             Capacity = default;
             Count = default;
+            return;
         }
 
         Data = Memory.AllocZeroed<T>(capacity);

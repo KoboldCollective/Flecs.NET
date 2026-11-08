@@ -32,6 +32,18 @@ public unsafe class NativeListTests
     }
 
     [Fact]
+    public void CreateNegativeCapacity()
+    {
+        NativeList<Position> list = new NativeList<Position>(-1);
+        Assert.True(list.IsNull);
+        Assert.Equal(0, list.Capacity);
+        Assert.Equal(0, list.Count);
+
+        list.Dispose();
+        Assert.True(list.IsNull);
+    }
+
+    [Fact]
     public void Add()
     {
         NativeList<Position> list = new NativeList<Position>();
